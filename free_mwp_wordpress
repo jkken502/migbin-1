@@ -1,0 +1,219 @@
+#!/bin/bash
+
+function help() {
+    echo ''
+    echo ''
+    echo 'Accepts a php version, WordPress version and list of urls to WordPress backup files and installs the site in the current directory.'
+    echo ''
+    echo 'example usage:'
+    echo '$ free_mwp_wordpress --wp-version="5.3.3" --php-version="7.3" https://url.1 https://url.2 https://url.3 ...'
+    echo ''
+    echo 'options:'
+    echo '-h --help : displays this message'
+    echo '-t --test : runs automated testing on the functions in this file.'
+    echo '-w --wordpress-version : sets the wordpress version of the install'
+    echo '-p --php-version : sets the php version of the install'
+    echo '-m --migid : used for creating a migrationid.txt file'
+    echo ''
+    exit 0
+}
+
+function downloadSignedLinks() {
+    if [ "$links" == "" ]; then echo "no links were provided."; exit 1; fi
+    for x in $links
+    do
+            echo
+            echo "downloading $x"
+            echo
+            filename=$(echo $x | grep -oP \(mu-p\)\?[a-z]+\.zip 2>/dev/null)
+            if [ $? != 0 ]; then
+                    filename=$(echo $x | grep -oE \(mu-p\)\?[a-z]+\.zip 2>/dev/null)
+            fi
+            wget -t3 $x -O $filename
+            if [ $? != 0 ]; then
+                    echo "could not download $x"; exit 1
+            fi
+    done
+    echo 'All backup files have been successfully downloaded'
+}
+
+function download_wordpress() {
+    tarname=$1
+    echo ''
+    echo 'downloading $tarname'
+    echo ''
+    wget -t3 https://wordpress.org/$tarname > /dev/null
+    expectedhash=$(curl -s https://wordpress.org/$tarname.md5)
+    filehash=$(md5sum $tarname 2>/dev/null | cut -d ' ' -f1)
+    if [[ "$filehash" == "$expectedhash" ]]; then
+        # tar -xf --strip-components 1 $tarname  # doesnt work on mac
+        tar -xf $tarname
+        mv wordpress/* .
+        rmdir wordpress
+        rm $tarname 2>/dev/null
+        return 0
+    else
+        echo "the hash did not match"
+        echo recieved $filehash
+        echo expected $expectedhash
+        rm $tarname 2>/dev/null
+        exit 1
+    fi
+}
+
+function safetyCheck() {
+    if [[ $(pwd) != *"migration/files" ]]; then
+        echo "Please run in migration/files. Ideally an empty directory. You are in $(pwd)"; exit 1
+    fi
+}
+
+function extractZip() {
+    unzip -o $1 -d $2
+    if [ $? -ne 0 ]; then
+        echo "there was trouble extracting ~/$1 to $2" >> ~/migration-error-log
+        echo "failed operation was 'unzip -o $1 -d $2'" >> ~/migration-error-log
+    else
+        rm $1
+    fi
+}
+
+function extractZips() {
+    mkdir $(find -maxdepth 1 | grep -v '^.$' | sed -e 's:\./::' -e 's:\.zip::' -e 's:$: :' | tr -d '
+')
+    find . ! -path . -type d | while read x; do cd $(echo $x | sed 's:./::'); pwd; unzip $(echo ../$x.zip | sed 's:./::'); cd ..;done
+    find -type d -exec chmod 755 {} \; &&
+    find -type f -exec chmod 644 {} \; &&
+    for i in $(find -maxdepth 1 -type d | grep -v ^.$ | sed 's:./::')
+    do
+        #echo running
+        case $i in
+            plugins)
+                echo cp -na $i ~/public_html/wp-content
+                cp -na $i ~/public_html/wp-content
+            ;;
+            mu-plugins)
+                echo cp -na $i ~/public_html/wp-content
+                cp -na $i ~/public_html/wp-content
+            ;;
+            uploads)
+                echo cp -na $i ~/public_html/wp-content
+                cp -na $i ~/public_html/wp-content
+            ;;
+            themes)
+                echo cp -na $i ~/public_html/wp-content
+                cp -na $i ~/public_html/wp-content
+            ;;
+        esac
+    done
+}
+
+function wpfix() {
+    find -type d -exec chmod 755 {} \; &
+    find -type f -exec chmod 644 {} \; &
+    rm -f *.ini wordfence-waf.php gd-config.php 2>/dev/null
+    echo 'output_buffering = On' >php.ini
+    echo '# BEGIN WordPress' >.htaccess
+    echo '<IfModule mod_rewrite.c>' >>.htaccess
+    echo 'RewriteEngine On' >>.htaccess
+    echo 'RewriteBase /' >>.htaccess
+    echo 'RewriteRule ^index\.php$ - [L]' >>.htaccess
+    echo 'RewriteCond %{REQUEST_FILENAME} !-f' >>.htaccess
+    echo 'RewriteCond %{REQUEST_FILENAME} !-d' >>.htaccess
+    echo 'RewriteRule . /index.php [L]' >>.htaccess
+    echo '</IfModule>' >>.htaccess
+    echo '# END WordPress' >>.htaccess
+    wpht 2>/dev/null
+    wp plugin deactivate really-simple-ssl 2>/dev/null
+}
+
+function setPhp() {
+    if [ "$php_version" == "" ]; then
+        echo php version was not passed in, left as default. >> ~/migration-error-log
+    elif [[ ! $(echo ${php_version//./} | grep -o ^[0-9][0-9]$) ]]; then
+        echo php version did not look right, left as default. >> ~/migration-error-log
+    else
+        echo "<IfModule mime_module>" >> .htaccess
+        echo "AddHandler application/x-httpd-ea-php${php_version//./} .php .php7 .phtml" >> .htaccess
+        echo "</IfModule>" >> .htaccess
+    fi
+}
+
+function wpdbi() {
+    cpuser="$(stat -c %U .)"
+    pass="$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 12 | head -n 1)"
+    dbstuff="$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 7 | head -n 1)"
+    name="${cpuser:0:8}_${dbstuff}"
+    options_table=$(grep -ioPm 1 'create table .+terms' wp-content/database.sql | cut -d '' -f2)
+    if [ $? -ne 0 ]; then
+        echo "could not detect table prefix, used "wp_". Take a look at the db tables and set in wp-config.php" >> ~/migration-error-log
+        prefix="wp_"
+    else
+        prefix="${options_table::${#options_table}-5}"
+    fi
+    uapi Mysql create_database name=$name 1>/dev/null
+    uapi Mysql create_user name=$name password=$pass 1>/dev/null
+    uapi Mysql set_privileges_on_database user=$name database=$name privileges=ALL%20PRIVILEGES 1>/dev/null
+    mysql_host="$(uapi Mysql locate_server remote_host 2>/dev/null | grep -oP '(?<=host: ).+')"
+    echo "name ${name} password ${pass} user ${name}"
+    wp config create --dbname=$name --dbuser=$name --dbpass=$pass --dbprefix=$prefix --dbhost=$mysql_host --force
+    wp config set WP_DEBUG false --type=variable
+    mysql --user=$name -f --password=$pass --host=$mysql_host $name <$1 2>/dev/null
+}
+
+function setTempUrl() {
+    wp option get home > .mainurl
+    wp option set home $(tempurl)
+    wp option set siteurl $(tempurl)
+}
+
+function main() {
+    safetyCheck
+    downloadSignedLinks
+    extractZips
+    mkdir oldDB 2>/dev/null
+    pushd oldDB 2>/dev/null >/dev/null
+    wp db dump --path=$(echo ~/public_html/)
+    premig
+    popd >/dev/null 2>/dev/null
+    rm oldDB -rf
+    yes y | wp db reset --path=$(echo ~/public_html/)
+    wp db import db/database.sql --path=$(echo ~/public_html/)
+    prefix=$(wp db query "show tables" --skip-plugins --skip-themes --path=$(echo ~/public_html/) 2>/dev/null | grep options | head -n 1 | sed -e 's:options::')
+    wp config set table_prefix $prefix --skip-plugins --skip-themes --path=$(echo ~/public_html/) >/dev/null 2>/dev/null
+    wp plugin activate redis-cache --skip-plugins --skip-themes --path=$(echo ~/public_html/) >/dev/null 2>/dev/null
+    if [ "$migid" == "" ]; then
+        echo "no migid passed in. txt file not created" >> ~/migration-error-log
+    else
+        echo "This file may be deleted once the migration has completed." > ~/public_html/$migid.txt
+    fi
+    echo -e '
+    migration complete'
+    wp option get home --path=$(echo ~/public_html/)
+}
+
+
+
+for i in "$@"; do
+    case $i in
+        -w=*|--wp-version=*)
+            wp_version="${i#*=}"
+        ;;
+        -p=*|--php-version=*)
+            php_version="${i#*=}"
+        ;;
+        -m=*|--migid=*)
+            migid="${i#*=}"
+        ;;
+        http*)
+            links="$links $i"
+        ;;
+        -h|--help)
+            help
+        ;;
+        -t|--test)
+            test
+        ;;
+    esac
+done
+
+main
