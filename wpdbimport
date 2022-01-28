@@ -13,7 +13,7 @@ function wpdbimport() {
           mv wp-config.php .old-wp-config.php
           mysql_host="$(uapi Mysql locate_server remote_host 2>/dev/null | grep -oP '(?<=host: ).+')"
           wp config create --dbname=$name --dbuser=$name --dbpass=$pass --dbprefix=$prefix --dbhost=$mysql_host --force
-          wp config set WP_DEBUG false --type=variable
+          wp config set WP_DEBUG false --raw --type=constant
           mysql --user=$name -f --password=$pass -h $mysql_host $name <$1
      fi
      if [ "$#" -eq 1 ]; then
